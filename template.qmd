@@ -9,8 +9,6 @@ categories: [Lab]
 format: 
     html: default
 
-    # YOU DO NOT NEED BOTH PDF AND DOCX.
-    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
     pdf:
         documentclass: article
         fontsize: 11pt
@@ -18,14 +16,7 @@ format:
             - margin=1in  
         number-sections: true
         code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
 
-# these are optional
-# if you have cache=true, you'll need the jupyter-cache package installed
 execute: 
   cache: true
   freeze: true
@@ -33,6 +24,106 @@ execute:
 date-format: "ddd., MMM. D"
 bibliography: references.bib
 ---
+
+# Lab 3: Previous Work
+
+## Packages
+
+```{julia}
+using CSV
+using DataFrames
+using DataFramesMeta
+using Distributions
+using Interpolations
+using Plots
+using StatsPlots
+using Unitful
+
+Plots.default(; margin=6Plots.mm)
+```
+
+## Site information
+
+### Site of Interest
+
+I have chosen the Galveston Pier 21 site as my water gage and a home at 304 18th St, Galveston, TX 77550 to be my site of interest.  I chose this site as it is a residential building within half a mile of the water gage itself.  Furthermore, it is still very close to the coast of Galveston channel.  For this reason, it is a good candidate for exploring and understanding the impacts of coastal flooding and the complexities of making decisions on flood mitigation strategies.
+
+
+## Depth-Damage
+
+```{julia}
+include("depthdamage.jl")
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame);
+demo_row = @rsubset(
+    haz_fl_dept, :Description == "two story, no basement, Structure", :Occupancy == "RES1", :Source == "USACE - Galveston", :DmgFnId == 140
+)[
+    1, :,
+]
+dd = DepthDamageData(demo_row);
+fieldnames(typeof(dd));
+```
+
+The function below is taken from index.qmd and is used to interpolate the depth-damage curve.  
+
+```{julia}
+function get_depth_damage_function(
+    depth_train::Vector{<:T}, dmg_train::Vector{<:AbstractFloat}
+    ) where {T<:Unitful.Length}
+
+    # interpolate
+    depth_ft = ustrip.(u"ft", depth_train)
+    interp_fn = Interpolations.LinearInterpolation(
+        depth_ft, # <1>
+        dmg_train;
+        extrapolation_bc=Interpolations.Flat(), # <2>
+    )
+
+    damage_fn = function (depth::T2) where {T2<:Unitful.Length}
+        return interp_fn(ustrip.(u"ft", depth)) # <3>
+    end
+    return damage_fn # <4>
+end
+```
+
+```{julia}
+global damage_fn = get_depth_damage_function(dd.depths, dd.damages);
+```
+
+## Expected Annual Damages
+
+### Flood distribution
+
+Below, we have the flood distribution of our gage adjusted based on the elevation of our site.
+
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+p1 = plot(
+    gauge_dist;
+    label="Gauge Distribution",
+    xlabel="Water Level (ft)",
+    ylabel="Probability Density",
+    legend=:topright,
+    linewidth=2,
+)
+offset = 4.3;
+house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ);
+```
+
+
+### Monte Carlo Sampling
+
+```{julia}
+n_samples = 1_000_000;
+vecsamples = rand(house_dist, n_samples);
+vecsamples = vecsamples .* u"ft"
+damages = damage_fn.(vecsamples);
+expecteddamages = mean(damages)
+```
+
+
+# Lab 4: House Elevation NPV Analysis
+
+## Packages
 
 ```{julia}
 #| output: false
@@ -48,41 +139,104 @@ using Unitful
 Plots.default(; margin=6Plots.mm)
 
 include("depthdamage.jl")
-include("lab03.jl")
-
 ```
 
+As with Lab 03, I chose to study a property near Pier 21 in Galveston TX, 304 18th St, Galveston, TX 77550.  Using information from Zillow and HAR, I was able to find information about the value of the home itself and the square footage of the property.  The home is valued at $264,456 and has a square footage of 881 square feet.  However, this is made complicated by the fact that floods only damage **structures** and not the land itself.  For this reason, I found nearby lots, without homes or structures, and analyzed their values.  Based on this analysis, I found that a similar location, close to the water and heart of Galveston, could go for anywhere around $70,000.  This leaves a structural value of $194,456.
+
 ```{julia}
-flood_dist = house_dist
-damage_fn = damage_fn
-expected_damages_pct = fexpecteddamages
-house_area = 1000*u"ft^2"
-house_value = 250_000
-Δh = 1.0
+house_area = 881*u"ft^2" ;
+house_value = 194456 ;
+Δh = 1.0*u"ft" ;
+```
+
+As a quick reminder, the expected annual damages are calculated as follows:
+
+```{julia}
+n_samples = 1_000_000;
+vecsamples = rand(house_dist, n_samples);
+vecsamples = vecsamples .* u"ft"
+damages = damage_fn.(vecsamples);
+expecteddamages = mean(damages)
+```
+
+This expecteddamages value presents the expected **percentage** of the structural value lost during a flood event.  Running from the baseline code we have above, we find that the expected annual damage falls around 20%, a shockingly high number.  This is consistent with the clear vulnerability of the Galveston community and increasing exposure to flooding.
+
+However, in this lab, non-stationarity in the parameters which define this flood distribution will not be considered.  However, this lab will use the methodology of expected damages to better understand the implications of raising this home to mitigate flood damages.
+
+Here, before discussing the functions, I redefine the variables from Lab 03.
+
+```{julia}
+flood_dist = house_dist;
+damage_fn = damage_fn;
+house_area = house_area;
+house_value = house_value;
+elevation_cost = get_elevation_cost_function() ;
+Δh = 3.0*u"ft";
 ```
 
 ```{julia}
 function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
     
     # calculate the expected damages
-    c_dmg = house_value * expected_damages_pct / 100
-    house_structure_value = 250_000
-    expected_damages_usd = house_structure_value * expected_damages_pct / 100
+    n_samples = 1_000_000;
+    vecsamples = rand(flood_dist, n_samples);
+    vecsamples = vecsamples .* u"ft"
+    damages = damage_fn.(vecsamples);
+    expecteddamages = mean(damages)
+    c_dmg = house_value * expecteddamages / 100;
 
     # calculate the cost of elevating
-    c_constr = ...
+    c_constr = elevation_cost(Δh, house_area)
 
     # return the total cost and benefit
     return -c_constr - c_dmg
 end
+
+test = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
 ```
 
 ```{julia}
 function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
-    #make a variable T with all of the elements from 1 to T
-    for
-    # calculate the costs and benefits for each year, and then discount
-    # see above!
+    years = 1:T
+    # create a variable annual cost to store my annual damages as a vector
+    annual_damages = [];
+    for i in years
+        if i == 1
+            npv = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+            push!(annual_damages, npv)
+        else
+            npv = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, 0*u"ft" ) * (1 - discount_rate)^i
+            push!(annual_damages, npv)
+        end
+    end
+    npv = sum(annual_damages)
     return npv
 end
+```
+
+```{julia}
+Δh = 1.0*u"ft";
+T = 30;
+discount_rate = 0.1;
+npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+```
+
+```{julia}
+years = [];
+annualvals =[];
+for i = 1:T
+    push!(years, i)
+    npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, i*u"ft", T, discount_rate)
+    println("NPV for ", i, " ft: ", npv)
+    push!(annualvals, npv)
+end
+
+plot(years, annualvals, xlabel="Elevation (ft)", ylabel="NPV", label="NPV vs Elevation", legend=:topright)
+```
+
+```{julia}
+```
+
+```{julia}
+
 ```
