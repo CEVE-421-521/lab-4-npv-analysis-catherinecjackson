@@ -1,0 +1,276 @@
+# Lab 03: Depth-Damage Models
+
+## Packages
+
+```{julia}
+using CSV
+using DataFrames
+using DataFramesMeta
+using Distributions
+using Interpolations
+using Plots
+using StatsPlots
+using Unitful
+
+Plots.default(; margin=6Plots.mm)
+```
+
+## Site information
+
+### Site of Interest
+
+I have chosen the Galveston Pier 21 site as my water gage and a home at 304 18th St, Galveston, TX 77550 to be my site of interest.  I chose this site as it is a residential building within half a mile of the water gage itself.  Furthermore, it is still very close to the coast of Galveston channel.  For this reason, it is a good candidate for exploring and understanding the impacts of coastal flooding and the complexities of making decisions on flood mitigation strategies.
+
+### Site Elevation
+
+Using USGS's National Map Viewer, I found the following information:
+
+Feet: 4.33
+Meters: 1.32
+DD: 29.30758° -94.78810°
+DMS: 29° 18' 27.283" N     94° 47' 17.153" W
+UTM: 15 326343 3243390
+USNG: 15R UN 26342 43390 (NAD 83)
+MGRS: 15RUN2634243390
+
+*Note: Spot elevation query values from the3DEP are not official and do not represent precisely measured or surveyed values.*
+
+It is important to determine the elevation of the building because our data is sourced from a nearby gage.  This nearby gage has a distribution which represents the water levels at this gage, but they must be adjusted to represent the distribution of the water levels at the ground floor level of the building.
+
+## Depth-Damage
+
+### Identify the Appropriate Depth-Damage Function
+
+Flood Depth-Damage curves are commonly used functions that relate the flood depth (measured above the ground flood) and the relaive damage (%).  In other words, if given a flood depth, these relationships would make predictions about the expected damage to a building.  These relationships are important for understanding the potential impacts of flooding and for making decisions about flood mitigation strategies.  However, there are some downsides and issues with these relationships, but they can be a good initial estimate.  Furthermore, when paired with flood distributions, they can be used to estimate the expected annual damages or the expected damages over a longer time period.  This can be done analytically, but, in practice, a Monte Carlo simulation is often used.
+
+First, then, it is necessary to find this function for the site of interest such that, for flooding in the area of this site measured at the gage, predictions can be made about the expected damage to the building.  I opened up the variable hax_fl_dept.csv to find the right function.  First, I sorted the descriptions to find the functions that applied to two story buildings without a basement.  I also looked for the functions which analyzed the damage to the structure, rather than the contents.  In addition, the physical location of the structure is important, and the Army Corps of Engineers provides different functions for different areas.  Therefore, looking for the right type of curve and for curves from USACE - Galveston, Function 140 was appropriate (e.g. DmgFnId=140).  We also want the residential occupancy, so this must be filtered as well.
+
+### Build the Depth-Damage Curve
+
+First, the correct depth-damage curve is pulled from the DataFrame and saved as dd.
+
+```{julia}
+include("depthdamage.jl")
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame);
+demo_row = @rsubset(
+    haz_fl_dept, :Description == "two story, no basement, Structure", :Occupancy == "RES1", :Source == "USACE - Galveston", :DmgFnId == 140
+)[
+    1, :,
+]
+dd = DepthDamageData(demo_row);
+fieldnames(typeof(dd));
+```
+
+As discussed in the tutorial, we can take a quick check at the original plot to make sure it looks reasonable.
+
+```{julia}
+scatter(
+    dd.depths,
+    dd.damages;
+    xlabel="Flood Depth at House",
+    ylabel="Damage (%)",
+    label="$(dd.description) ($(dd.source))",
+    legend=:bottomright,
+    size=(700, 500),
+)
+```
+
+The function below is taken from index.qmd and is used to interpolate the depth-damage curve.  
+
+```{julia}
+function get_depth_damage_function(
+    depth_train::Vector{<:T}, dmg_train::Vector{<:AbstractFloat}
+) where {T<:Unitful.Length}
+
+    # interpolate
+    depth_ft = ustrip.(u"ft", depth_train)
+    interp_fn = Interpolations.LinearInterpolation(
+        depth_ft, # <1>
+        dmg_train;
+        extrapolation_bc=Interpolations.Flat(), # <2>
+    )
+
+    damage_fn = function (depth::T2) where {T2<:Unitful.Length}
+        return interp_fn(ustrip.(u"ft", depth)) # <3>
+    end
+    return damage_fn # <4>
+end
+```
+
+Next, the function above is used to generate the site's specific depth-damage function.
+
+```{julia}
+global damage_fn = get_depth_damage_function(dd.depths, dd.damages);
+```
+
+```{julia}
+p = let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft")) # <1>
+    damages = damage_fn.(depths) # <2>
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (%)",
+        label="$(dd.description) ($(dd.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        linewidth=2,
+    )
+end
+p
+```
+
+This output p gives us the interpolated depth-damage graph.
+
+## Expected Annual Damages
+
+### Flood distribution
+
+Below, we have the flood distribution of our gage adjusted based on the elevation of our site.
+
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+p1 = plot(
+    gauge_dist;
+    label="Gauge Distribution",
+    xlabel="Water Level (ft)",
+    ylabel="Probability Density",
+    legend=:topright,
+    linewidth=2,
+)
+offset = 4.3;
+house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ);
+plot!(p1, house_dist; label="House Distribution", linewidth=2) 
+```
+
+
+### Monte Carlo Sampling
+
+The general idea behind Monte Carlo sampling for expected values is to draw a large number of samples from a distribution and then take the average of the function of interest **evaluated at each sample**.  In other words, we will take an individual sample, use the depth-damage function to predict the damage for that sample, and store the damage value.  We then can average over all damage results (for each sample) with the assumption that, though we arae not explicitly or annalytically using the flood distribution, taking a sufficiently large sample allows us to numerically approximate this.  
+
+Therefore, as a thought experiment, I plotted samples from the flood distribution below with increasing sample sizes.  As n gets sufficiently large, the samples approximate the distribution.
+
+```{julia}
+plot()
+samplesrand = rand(house_dist, 100)
+h1 = histogram!(samplesrand; label="House Distribution", alpha=0.5, normed=true, size=(800, 400), title="House Flood Distribution 100 Samples")
+plot()
+samplesrand10000 = rand(house_dist, 1000)
+h2 = histogram(samplesrand10000; label="House Distribution", alpha=0.5, normed=true, size=(800, 400), title="House Flood Distribution 1000 Samples")
+plot()
+samplesrand100000 = rand(house_dist, 10000)
+h3 = histogram(samplesrand100000; label="House Distribution", alpha=0.5, normed=true, size=(800, 400), title="House Flood Distribution 10000 Samples")
+
+plot(h1, h2, h3, layout=(1, 3), size=(800, 400), titlefontsize=8)
+```
+
+With this idea, we then take the desired 1,000,000 samples, apply the function to these samples, and then take the average.  Note that I had to add back the units due to the inputs of the damage_fn. function.
+
+```{julia}
+n_samples = 1_000_000;
+vecsamples = rand(house_dist, n_samples);
+vecsamples = vecsamples .* u"ft"
+damages = damage_fn.(vecsamples);
+expecteddamages = mean(damages)
+```
+
+This then outputs a singular damage estimate for the building in our given year.  For example, the output of this run was 20.27% of the structural value.
+
+I was curious if this value stayed relatively constant, so below is a scatter plot of the expected damages over 100 runs of this process.  It seems to be relatively constant. Note the y-axis ranges from 15 to 25.
+
+```{julia}
+emp = scatter()
+x_values = Int[]
+y_values = Float64[]
+
+for i = 1:100
+    n_samples = 1_000_000
+    vecsamples = rand(house_dist, n_samples)
+    vecsamples = vecsamples .* u"ft"
+    damages = damage_fn.(vecsamples)
+    expecteddamages = mean(damages)
+    push!(x_values, i)
+    push!(y_values, expecteddamages)
+end
+
+emp = scatter!(emp, x_values, y_values; label="Expected Damage", markersize=2, ylims=(15, 25))
+emp
+```
+
+However, as another thought experiment, consider the example below in which the number of samples is reduced to 100.  This shows that, for a Monte Carlo simulation to be sufficient, there must be enough samples for the average to be a good approximation of the expected value.
+
+```{julia}
+emp = scatter()
+x_values = Int[]
+y_values = Float64[]
+
+for i = 1:100
+    n_samples = 100
+    vecsamples = rand(house_dist, n_samples)
+    vecsamples = vecsamples .* u"ft"
+    damages = damage_fn.(vecsamples)
+    expecteddamages = mean(damages)
+    push!(x_values, i)
+    push!(y_values, expecteddamages)
+end
+
+emp = scatter!(emp, x_values, y_values; label="Expected Damage", markersize=2, ylims=(10, 30))
+emp
+```
+
+## Discussion
+
+In this lab, we have explored the depth-damage function for a building in Galveston, TX.  This function tells us how much relatively damage we are likely to experience at given flood depth.  First, the appropriate depth-damage curve had to be extracted from our DataSet.  Then we found the appropriate flood distribution from our gage data and adjusted it to reflect the flood height distribution relative to the ground flood of the structure of interest.  Then, a Monte Carlo simulation was taken from this house flood disribution to apply to the depth-damage curves.  This produced an expected damage value for the building in a given year.  This value was relatively constant over 100 runs of the simulation.  This value is important for understanding the potential impacts of flooding and for making decisions about flood mitigation strategies.  
+
+This paricular home, for example, experiences around a 21% expected damage threat in any given year.  Consider if the home was raised just 1 foot:
+
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+p1 = plot(
+    gauge_dist;
+    label="Gauge Distribution",
+    xlabel="Water Level (ft)",
+    ylabel="Probability Density",
+    legend=:topright,
+    linewidth=2,
+)
+offset = 5.3;
+house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+plot!(p1, house_dist; label="House Distribution", linewidth=2) 
+```
+
+```{julia}
+n_samples = 1_000_000
+vecsamples = rand(house_dist, n_samples);
+vecsamples = vecsamples .* u"ft"
+damages = damage_fn.(vecsamples);
+expecteddamages = mean(damages)
+```
+
+The annual expected damage drops to 13.60%.  Consider below in which the expected damage is compared to the elevation increase of the house.  The damages decrease quickly as the house is raised.
+
+```{julia}
+raisedmed = scatter()
+
+x_values = Int[]
+y_values = Float64[]
+
+for i = 0:10
+    gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+    offset = 4.3 + i
+    house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+    n_samples = 1_000_000
+    vecsamples = rand(house_dist, n_samples)
+    vecsamples = vecsamples .* u"ft"
+    damages = damage_fn.(vecsamples)
+    expecteddamages = mean(damages)
+    push!(x_values, i)
+    push!(y_values, expecteddamages)
+end
+
+raisedmed = scatter!(raisedmed, x_values, y_values; label="Expected Damage", markersize=2, ylabel="Expected Damage", xlabel="Raised (ft)", ylims=(0, maximum(y_values) + 1))
+
+```
+
+This similarly demonstrates that building up a home (in effect shifting the flood distribution back) can have an immediate and large impact.  It shows that damage estimation and expected value analysis are important elements of flood damage mitigation and preparedness. 

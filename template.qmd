@@ -1,6 +1,6 @@
 ---
 title: "Lab 4: House Elevation NPV Analysis"
-author: "Your Name"
+author: "Catherine Jackson"
 jupyter: julia-1.10
 date: 2024-02-08
 week: 5
@@ -48,5 +48,41 @@ using Unitful
 Plots.default(; margin=6Plots.mm)
 
 include("depthdamage.jl")
+include("lab03.jl")
+
 ```
 
+```{julia}
+flood_dist = house_dist
+damage_fn = damage_fn
+expected_damages_pct = fexpecteddamages
+house_area = 1000*u"ft^2"
+house_value = 250_000
+Δh = 1.0
+```
+
+```{julia}
+function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+    
+    # calculate the expected damages
+    c_dmg = house_value * expected_damages_pct / 100
+    house_structure_value = 250_000
+    expected_damages_usd = house_structure_value * expected_damages_pct / 100
+
+    # calculate the cost of elevating
+    c_constr = ...
+
+    # return the total cost and benefit
+    return -c_constr - c_dmg
+end
+```
+
+```{julia}
+function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+    #make a variable T with all of the elements from 1 to T
+    for
+    # calculate the costs and benefits for each year, and then discount
+    # see above!
+    return npv
+end
+```
