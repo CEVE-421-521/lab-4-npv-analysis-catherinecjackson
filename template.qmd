@@ -211,6 +211,8 @@ function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_a
 end
 ```
 
+## Net Present Value
+
 However, this just gives us the expected damages or cost for a singular year.  We need to be able to calculate the total damages we might experience over a period of time.  For this reason, we define the function `npv_cost_benefit` which takes in the flood distribution, the damage function, the cost of elevation, the area of the house, the value of the house, the elevation change, the time period, and the discount rate.  It then calculates the expected damages for each year (applies a discount to account for the fact that, for many people, a dollar today is "worth" more than a dollar in the future), and returns the expected damages over the entire period.
 
 It is important to note that **elevation is only considered in the first year**; the house is elevated as a one time cost.  Consequently, as seen in the "if" condition below, Δh is only input into the function when i=1 (e.g. the first year).  However, we also need to remember that, once we elevate the house, the flood_distribution changes.  Consequently, a new variable `post_elev_flood_dist` is defined to represent the flood distribution after the elevation.  This is then used to calculate the expected damages for the subsequent years.
@@ -233,6 +235,8 @@ function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, hou
 end
 ```
 
+## Discussion
+
 To put this into context, when, this equation tells us how much we might pay over our time period of interest.  This includes the initial elevation cost, which we only incur once, and the expected damages over the time period (with a discount rate).  In this way, with our npv representing the amount of money we will spend given a different action a (e.g. the elevation), we can look for the choice a which minimizes the npv, or the total amount we have to spend over time T.
 
 Consider looking at different elevation heights over a time period T = 30 years!
@@ -248,8 +252,10 @@ for i = 0:13
     push!(totalcosts, npv)
 end
 
+positive_totalcosts = abs.(totalcosts)
+
 plot()
-plot(elevations, abs(totalcosts), xlabel="Elevation (ft)", ylabel="Total Costs", label="Elevation vs. Total Cost over $T Years", legend=:topleft)
+plot(elevations, positive_totalcosts, xlabel="Elevation (ft)", ylabel="Total Costs", label="Elevation vs. Total Cost over $T Years", legend=:topleft)
 ```
 
 This graph, though it is limited by the bounds of the elevation cost function, shows that there is a critical point at which the benefits of avoiding flood damages no longer outweights the cost of elevating the house.  In other words, elevating the house has diminishing returns.  This is a good point to find on the graph because it can inform the optimal elevation height.  Based on the graph produced by the block above, it seems that elevating to around 9 feet produces the smallest expected cost over these 30 years.
@@ -257,24 +263,47 @@ This graph, though it is limited by the bounds of the elevation cost function, s
 We can also visualize this another way.  Consider plotting the expected damages as the time period grows, with each line representing a different elevation height.
 
 ```{julia}
-plot()
-for i = 0:2:12
+p = plot()
+for i = 0:2:9
     npvs = [];
     years = [];
-    for j = 1:2:30
+    for j = 1:5:30
         npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, i*u"ft", j, discount_rate)
         push!(npvs, npv)
         push!(years, j)
     end
-    plot!(years, abs(npvs), label="Elevation: $i ft")
+    p = plot!(years, abs.(npvs), label="Elevation: $i ft")
 end
+p = plot!(xlabel="Time Period (Years)", ylabel="Expected Costs", legend=:topleft)
+p
 ```
 
+This graph plots, with each elevation as a line, the expected costs as T goes from 0 to 30.  For the first line, the expected damages start very small, as there is no elevation cost the first year, but they grow quickly as the home is vulnerable to flooding every single year.  As the house is elevated, the slope of this line decreases as the vulnerability each year declines.  Eventually, the line becomes almost flat as the intercept is determined by the elevation cost and there is relatively no year to year vulnerability.
+
+Building on the discussion above, this helps us understand the NPV for different actions.  Elevating the house helps mitigate flooding, reducing the expected damages during our time period.  However, there is a point at which the threat of flooding at that new elevation becomes so small that further elevation is not cost effective.
+
+This type of analysis is clearly very beneficial when it comes to decision comparisons.
+
 ```{julia}
-flood_dist
-Δh = 1.0*u"ft";
-fd_mean = flood_dist.μ
-new_mean = fd_mean - ustrip(Δh)
-post_elev_flood_dist = GeneralizedExtremeValue(flood_dist.μ - ustrip(Δh), flood_dist.σ, flood_dist.ξ);
-display(new_mean)
+discount_rate_dist = Normal(0.05, 0.03)
+n_samples = 100
+vecsamples = rand(discount_rate_dist, n_samples)
+npv_values = [npv_cost_benefit(flood_dist, damage_fn, 
+    elevation_cost, house_area, house_value, 9*u"ft", 30, discount_rate) for discount_rate in vecsamples]
+expected_npv = mean(npv_values)
+plot(1:n_samples, npv_values, label="NPV Values", xlabel="Sample Number", ylabel="NPV", legend=:topleft)
 ```
+
+The example above shows a potential scenario in which we include uncertainty in the discount value.  This is a wise parameter in which we can consider uncertainty as it is a very hypothetical representation of the fact that people tend to value money in the present more than in the future.  It is a very subjective estimation, and considering this uncertainty is important.
+
+Note: I would have liked to include more samples, but due to the limitations of my own personal laptop it was not possible.
+
+Furthermore, we can discuss the limitations of this model.  Firstly, there are many assumptions made to simplify this analysis.
+
+1. First, the flood distribution is assumed to be constant over time.  This is not realistic, as flood distributions are known to change over time.  This is especially true in the context of climate change, where the frequency and intensity of floods are expected to increase.
+2. Second, the damage function is assumed to be constant over time.  This is also not realistic, as the value of the home and the cost of construction are expected to change over time.
+3. Third, this model assumes that, if damage to the home is incurred in one year, it is instantaneously repaired.
+4. Fourth, the elevation costs produced by the function from depthdamage.jl seemed to be very high.  This is a very important parameter to consider, and it is important to have a more accurate representation of this cost.
+5. Etc.
+
+These are just a few examples of the limitations; when it comes to modeling, understanding that there are many complex and interlacing sources of uncertainty is key.  However, this model is a good starting point for understanding the implications of elevation on the NPV of a home.
