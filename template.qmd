@@ -18,7 +18,7 @@ format:
         code-line-numbers: true
 
 execute: 
-  cache: true
+  cache: false
   freeze: true
 
 date-format: "ddd., MMM. D"
@@ -244,6 +244,7 @@ Consider looking at different elevation heights over a time period T = 30 years!
 ```{julia}
 elevations = [];
 totalcosts =[];
+discount_rate = 0.05;
 T = 30;
 
 for i = 0:13
