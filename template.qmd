@@ -141,6 +141,9 @@ Plots.default(; margin=6Plots.mm)
 include("depthdamage.jl")
 ```
 
+
+## Site information
+
 As with Lab 03, I chose to study a property near Pier 21 in Galveston TX, 304 18th St, Galveston, TX 77550.  Using information from Zillow and HAR, I was able to find information about the value of the home itself and the square footage of the property.  The home is valued at $264,456 and has a square footage of 881 square feet.  However, this is made complicated by the fact that floods only damage **structures** and not the land itself.  For this reason, I found nearby lots, without homes or structures, and analyzed their values.  Based on this analysis, I found that a similar location, close to the water and heart of Galveston, could go for anywhere around $70,000.  This leaves a structural value of $194,456.
 
 ```{julia}
@@ -148,6 +151,8 @@ house_area = 881*u"ft^2" ;
 house_value = 194456 ;
 Δh = 1.0*u"ft" ;
 ```
+
+## Expected Damages
 
 As a quick reminder, the expected annual damages are calculated as follows:
 
@@ -166,20 +171,33 @@ However, in this lab, non-stationarity in the parameters which define this flood
 Here, before discussing the functions, I redefine the variables from Lab 03.
 
 ```{julia}
-flood_dist = house_dist;
+flood_dist = house_dist; #already includes the offset
 damage_fn = damage_fn;
 house_area = house_area;
 house_value = house_value;
 elevation_cost = get_elevation_cost_function() ;
-Δh = 3.0*u"ft";
 ```
+
+Next, we can take a quick preemptive look at what it might cost to elevate the house:
+
+```{julia}
+Δh2 = 1.0*u"ft";
+c_constr = elevation_cost(Δh2, house_area)
+```
+
+This line tells us that, to elevate the house one foot it could take around $90,000 dollars.  Admittedly, I did some research of my own and this value does seem a little high.  However, the point of this lab is not to get the exact value of the cost of elevation, but to understand the implications of elevation on the NPV of the home.  However, it could be an interesting exercise to go back and quantify this cost of elevation more precisely.
+
+## Single Year Cost-Benefit
+
+Below, we define the cost benefit for a single year. This function takes in the flood distribution, the damage function, the cost of elevation, the area of the house, the value of the house, and the elevation change.  It then calculates the expected damages (using the flood distribution, consequent damage function, and a Monte Carlo Sampling to find the percent damages to multiply against the house value) and the cost of elevation (calculated with the house elevation height, square footage, and elevation_cost function) and returns the total cost and benefit.
 
 ```{julia}
 function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
     
     # calculate the expected damages
     n_samples = 1_000_000;
-    vecsamples = rand(flood_dist, n_samples);
+    new_flood_dist = GeneralizedExtremeValue(flood_dist.μ - ustrip(Δh), flood_dist.σ, flood_dist.ξ);
+    vecsamples = rand(new_flood_dist, n_samples);
     vecsamples = vecsamples .* u"ft"
     damages = damage_fn.(vecsamples);
     expecteddamages = mean(damages)
@@ -191,52 +209,72 @@ function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_a
     # return the total cost and benefit
     return -c_constr - c_dmg
 end
-
-test = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
 ```
+
+However, this just gives us the expected damages or cost for a singular year.  We need to be able to calculate the total damages we might experience over a period of time.  For this reason, we define the function `npv_cost_benefit` which takes in the flood distribution, the damage function, the cost of elevation, the area of the house, the value of the house, the elevation change, the time period, and the discount rate.  It then calculates the expected damages for each year (applies a discount to account for the fact that, for many people, a dollar today is "worth" more than a dollar in the future), and returns the expected damages over the entire period.
+
+It is important to note that **elevation is only considered in the first year**; the house is elevated as a one time cost.  Consequently, as seen in the "if" condition below, Δh is only input into the function when i=1 (e.g. the first year).  However, we also need to remember that, once we elevate the house, the flood_distribution changes.  Consequently, a new variable `post_elev_flood_dist` is defined to represent the flood distribution after the elevation.  This is then used to calculate the expected damages for the subsequent years.
 
 ```{julia}
 function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+    npv=0;
     years = 1:T
-    # create a variable annual cost to store my annual damages as a vector
-    annual_damages = [];
     for i in years
         if i == 1
-            npv = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
-            push!(annual_damages, npv)
+            snpv = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+            npv = npv+snpv
         else
-            npv = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, 0*u"ft" ) * (1 - discount_rate)^i
-            push!(annual_damages, npv)
+            post_elev_flood_dist = GeneralizedExtremeValue(flood_dist.μ - ustrip(Δh), flood_dist.σ, flood_dist.ξ);
+            snpv = single_year_cost_benefit(post_elev_flood_dist, damage_fn, elevation_cost, house_area, house_value, 0*u"ft" ) * (1 - discount_rate)^i
+            npv = npv+snpv
         end
     end
-    npv = sum(annual_damages)
     return npv
 end
 ```
 
-```{julia}
-Δh = 1.0*u"ft";
-T = 30;
-discount_rate = 0.1;
-npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
-```
+To put this into context, when, this equation tells us how much we might pay over our time period of interest.  This includes the initial elevation cost, which we only incur once, and the expected damages over the time period (with a discount rate).  In this way, with our npv representing the amount of money we will spend given a different action a (e.g. the elevation), we can look for the choice a which minimizes the npv, or the total amount we have to spend over time T.
+
+Consider looking at different elevation heights over a time period T = 30 years!
 
 ```{julia}
-years = [];
-annualvals =[];
-for i = 1:T
-    push!(years, i)
+elevations = [];
+totalcosts =[];
+T = 30;
+
+for i = 0:13
+    push!(elevations, i)
     npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, i*u"ft", T, discount_rate)
-    println("NPV for ", i, " ft: ", npv)
-    push!(annualvals, npv)
+    push!(totalcosts, npv)
 end
 
-plot(years, annualvals, xlabel="Elevation (ft)", ylabel="NPV", label="NPV vs Elevation", legend=:topright)
+plot()
+plot(elevations, abs(totalcosts), xlabel="Elevation (ft)", ylabel="Total Costs", label="Elevation vs. Total Cost over $T Years", legend=:topleft)
+```
+
+This graph, though it is limited by the bounds of the elevation cost function, shows that there is a critical point at which the benefits of avoiding flood damages no longer outweights the cost of elevating the house.  In other words, elevating the house has diminishing returns.  This is a good point to find on the graph because it can inform the optimal elevation height.  Based on the graph produced by the block above, it seems that elevating to around 9 feet produces the smallest expected cost over these 30 years.
+
+We can also visualize this another way.  Consider plotting the expected damages as the time period grows, with each line representing a different elevation height.
+
+```{julia}
+plot()
+for i = 0:2:12
+    npvs = [];
+    years = [];
+    for j = 1:2:30
+        npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, i*u"ft", j, discount_rate)
+        push!(npvs, npv)
+        push!(years, j)
+    end
+    plot!(years, abs(npvs), label="Elevation: $i ft")
+end
 ```
 
 ```{julia}
-```
-
-```{julia}
-
+flood_dist
+Δh = 1.0*u"ft";
+fd_mean = flood_dist.μ
+new_mean = fd_mean - ustrip(Δh)
+post_elev_flood_dist = GeneralizedExtremeValue(flood_dist.μ - ustrip(Δh), flood_dist.σ, flood_dist.ξ);
+display(new_mean)
 ```
